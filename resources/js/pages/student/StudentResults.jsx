@@ -1,0 +1,1348 @@
+import { useState, useEffect, useMemo } from 'react';
+import { COLORS } from '../../constants/colors';
+import { useAuth } from '../../contexts/AuthContext';
+import { usePage } from '@inertiajs/react';
+import API from '../../services/API';
+import { useNotification } from '../../contexts/NotificationContext';
+import debug from '../../utils/debug';
+import AppLayout from '../../layouts/AppLayout';
+// Remove html2canvas and jsPDF imports - we'll use simpler methods
+// Dynamic import for download features
+const StudentResults = ({ 
+  student: initialStudent,
+  results: initialResults = {},
+  class_history: initialClassHistory = {},
+  current_session: initialCurrentSession,
+  admission_session: initialAdmissionSession,
+  admission_term: initialAdmissionTerm
+}) => {
+  const { props } = usePage();
+  const { user } = useAuth();
+  const { showError, showSuccess } = useNotification();
+  
+  // Use student from props or auth context
+  const student = initialStudent || user;
+  
+  const [selectedTerm, setSelectedTerm] = useState('Second Term');
+  const [selectedSession, setSelectedSession] = useState('');
+  const [results, setResults] = useState(initialResults);
+  const [availableSessions, setAvailableSessions] = useState([]);
+  const [currentSession, setCurrentSession] = useState(initialCurrentSession);
+  const [admissionSession, setAdmissionSession] = useState(initialAdmissionSession);
+  const [admissionTerm, setAdmissionTerm] = useState(initialAdmissionTerm);
+  const [studentSubjects, setStudentSubjects] = useState([]);
+  const [classHistory, setClassHistory] = useState(initialClassHistory);
+  const [availableSessionsData, setAvailableSessionsData] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  // Get class for selected session from class history
+  const getClassForSession = (sessionName) => {
+    if (classHistory && classHistory[sessionName]) {
+      const classData = classHistory[sessionName];
+      // Handle both object and string formats
+      if (typeof classData === 'object' && classData.name) {
+        return classData.name;
+      } else if (typeof classData === 'string') {
+        return classData;
+      }
+    }
+    // Fallback to current class if no history
+    return student?.school_class?.name || student?.schoolClass?.name || "Loading...";
+  };
+
+  // Get promotion status for third term
+  const getPromotionStatus = () => {
+    if (selectedTerm !== 'Third Term') {
+      return null;
+    }
+    
+    // Check student status
+    if (student?.status === 'graduated') {
+      return 'graduated';
+    } else if (student?.status === 'repeated') {
+      return 'repeated';
+    } else if (student?.promoted_this_session) {
+      return 'promoted';
+    }
+    
+    return null;
+  };
+
+  // Make studentInfo reactive to selectedSession and classHistory changes
+  const studentInfo = useMemo(() => ({
+    name: student ? `${student.first_name} ${student.last_name}` : "Loading...",
+    admissionNumber: student?.admission_number || "Loading...",
+    class: selectedSession ? getClassForSession(selectedSession) : (student?.school_class?.name || student?.schoolClass?.name || "Loading..."),
+    session: selectedSession || (currentSession?.name || "Not Set"),
+    promotionStatus: getPromotionStatus()
+  }), [selectedSession, classHistory, student, currentSession, selectedTerm]);
+
+  const schoolInfo = {
+    name: 'G-LOVE ACADEMY',
+    logo: '/images/G-LOVE ACADEMY.jpeg',
+    address: 'BESIDE ASSEMBLIES OF GOD CHURCH ZONE 9 LUGBE ABUJA',
+  };
+
+  // Initialize data from Inertia props
+  useEffect(() => {
+    // Set current session and admission info from props
+    if (initialCurrentSession) {
+      setCurrentSession(initialCurrentSession);
+    }
+    if (initialAdmissionSession) {
+      setAdmissionSession(initialAdmissionSession);
+    }
+    if (initialAdmissionTerm) {
+      setAdmissionTerm(initialAdmissionTerm);
+    }
+    if (Object.keys(initialClassHistory).length > 0) {
+      setClassHistory(initialClassHistory);
+    }
+    
+    // Extract student subjects from student prop
+    if (student?.student_subjects) {
+      const subjectIds = student.student_subjects.map(ss => {
+        if (ss.subject && ss.subject.id) {
+          return ss.subject.id;
+        } else if (ss.subject_id) {
+          return ss.subject_id;
+        }
+        return null;
+      }).filter(id => id !== null);
+      setStudentSubjects(subjectIds);
+    } else if (student?.studentSubjects) {
+      const subjectIds = student.studentSubjects.map(ss => {
+        if (ss.subject && ss.subject.id) {
+          return ss.subject.id;
+        } else if (ss.subject_id) {
+          return ss.subject_id;
+        }
+        return null;
+      }).filter(id => id !== null);
+      setStudentSubjects(subjectIds);
+    }
+    
+    // Initialize results from props
+    if (Object.keys(initialResults).length > 0) {
+      setResults(initialResults);
+      
+      // Get available sessions from results keys
+      const sessions = Object.keys(initialResults);
+      setAvailableSessions(sessions);
+      
+      // Store session data with IDs for PDF download
+      const sessionsWithIds = [];
+      if (initialCurrentSession) {
+        sessionsWithIds.push({
+          name: initialCurrentSession.name,
+          id: initialCurrentSession.id
+        });
+      }
+      // Add other sessions if available
+      sessions.forEach(sessionName => {
+        if (!sessionsWithIds.find(s => s.name === sessionName)) {
+          // Try to find session ID from results
+          const sessionTerms = initialResults[sessionName];
+          if (sessionTerms) {
+            // Get first term's results to find session ID
+            const firstTerm = Object.keys(sessionTerms)[0];
+            if (firstTerm && sessionTerms[firstTerm] && sessionTerms[firstTerm].length > 0) {
+              const firstResult = sessionTerms[firstTerm][0];
+              if (firstResult.academic_session) {
+                sessionsWithIds.push({
+                  name: sessionName,
+                  id: firstResult.academic_session.id
+                });
+              } else if (firstResult.academic_session_id) {
+                sessionsWithIds.push({
+                  name: sessionName,
+                  id: firstResult.academic_session_id
+                });
+              }
+            }
+          }
+        }
+      });
+      setAvailableSessionsData(sessionsWithIds);
+      
+      // Set default selected session (current or first available)
+      let defaultSession = '';
+      if (initialCurrentSession) {
+        defaultSession = initialCurrentSession.name;
+      } else if (sessions.length > 0) {
+        defaultSession = sessions[0];
+      }
+      setSelectedSession(defaultSession);
+      
+      // Set default selected term for the selected session
+      if (defaultSession && initialResults[defaultSession]) {
+        const terms = Object.keys(initialResults[defaultSession]);
+        if (terms.length > 0) {
+          setSelectedTerm(terms[0]);
+        }
+      }
+    } else {
+      // No results available, but still set current session if available
+      if (initialCurrentSession) {
+        setSelectedSession(initialCurrentSession.name);
+      }
+    }
+  }, [initialResults, initialCurrentSession, initialAdmissionSession, initialAdmissionTerm, initialClassHistory, student]);
+
+  // Update selected term when session changes
+  useEffect(() => {
+    if (selectedSession && results[selectedSession]) {
+      const terms = Object.keys(results[selectedSession]);
+      if (terms.length > 0) {
+        setSelectedTerm(terms[0]);
+      }
+    }
+  }, [selectedSession, results]);
+
+  // Get available terms for selected session
+  const getAvailableTerms = () => {
+    if (!selectedSession || !results[selectedSession]) {
+      return [];
+    }
+    return Object.keys(results[selectedSession]);
+  };
+
+  // Get results for selected session and term
+  const getCurrentResults = () => {
+    if (!selectedSession || !selectedTerm || !results[selectedSession] || !results[selectedSession][selectedTerm]) {
+      return [];
+    }
+    return results[selectedSession][selectedTerm] || [];
+  };
+
+  // Grade scale - corrected to match actual score ranges
+  const gradeScale = [
+    { grade: 'A', min: 80, max: 100, remark: 'Excellent' },
+    { grade: 'B', min: 70, max: 79, remark: 'Very Good' },
+    { grade: 'C', min: 60, max: 69, remark: 'Good' },
+    { grade: 'D', min: 50, max: 59, remark: 'Fair' },
+    { grade: 'E', min: 40, max: 49, remark: 'Pass' },
+    { grade: 'F', min: 0, max: 39, remark: 'Fail' },
+  ];
+
+  const getGradeColor = (grade) => {
+    switch (grade) {
+      case 'A+':
+        return 'text-green-800 bg-green-100';
+      case 'A':
+        return 'text-green-700 bg-green-50';
+      case 'B+':
+        return 'text-blue-700 bg-blue-50';
+      case 'B':
+        return 'text-blue-600 bg-blue-50';
+      case 'C':
+        return 'text-yellow-700 bg-yellow-50';
+      case 'D':
+        return 'text-orange-700 bg-orange-50';
+      case 'F':
+        return 'text-red-700 bg-red-50';
+      default:
+        return 'text-gray-700 bg-gray-50';
+    }
+  };
+
+  // Helper to process results and calculate totals
+  const getScaledResults = (resultsArr) => resultsArr.map(result => {
+    // Convert scores to numbers and ensure they're valid
+    const firstCA = parseFloat(result.first_ca) || 0;
+    const secondCA = parseFloat(result.second_ca) || 0;
+    const exam = parseFloat(result.exam_score) || 0;
+    
+    // Calculate total by adding the scores
+    const total = firstCA + secondCA + exam;
+    
+    // Extract subject name - handle both object and string cases
+    let subjectName = '';
+    if (result.subject && typeof result.subject === 'object' && result.subject.name) {
+      subjectName = result.subject.name;
+    } else if (typeof result.subject === 'string') {
+      subjectName = result.subject;
+    } else {
+      subjectName = 'Unknown Subject';
+    }
+    
+    // Grade logic - find the correct grade based on total score
+    let grade = 'F';
+    let gradeRemark = 'Fail';
+    
+    for (const scale of gradeScale) {
+      if (total >= scale.min && total <= scale.max) {
+        grade = scale.grade;
+        gradeRemark = scale.remark;
+        break;
+      }
+    }
+    
+    const processedResult = {
+      ...result,
+      subject: subjectName,
+      first_ca: firstCA,
+      second_ca: secondCA,
+      exam: exam,
+      total: total,
+      grade: grade,
+      gradeRemark: gradeRemark,
+      percentage: total
+    };
+    
+    return processedResult;
+  });
+
+  // Generate random teacher and principal remarks based on average score
+  const getRandomRemark = (remarks) => {
+    return remarks[Math.floor(Math.random() * remarks.length)];
+  };
+
+  // Calculate all derived values
+  const currentResults = getCurrentResults();
+  const scaledResults = getScaledResults(currentResults);
+  const totalScore = scaledResults.reduce((sum, result) => sum + result.total, 0);
+  const averageScore = scaledResults.length > 0 ? (totalScore / scaledResults.length).toFixed(1) : 0;
+
+  // Calculate third term final average (Nigerian school system)
+  // Final Average = (First Term Average + Second Term Average + Third Term Average) / 3
+  const calculateThirdTermFinalAverage = () => {
+    if (selectedTerm !== 'Third Term' || !selectedSession || !results[selectedSession]) {
+      return null;
+    }
+
+    const sessionResults = results[selectedSession];
+    const firstTermResults = sessionResults['First Term'] || [];
+    const secondTermResults = sessionResults['Second Term'] || [];
+    const thirdTermResults = sessionResults['Third Term'] || [];
+
+    // Calculate average for each term
+    const calculateTermAverage = (termResults) => {
+      if (!termResults || termResults.length === 0) return null;
+      const scaled = getScaledResults(termResults);
+      const total = scaled.reduce((sum, result) => sum + result.total, 0);
+      return scaled.length > 0 ? parseFloat((total / scaled.length).toFixed(2)) : null;
+    };
+
+    const firstTermAvg = calculateTermAverage(firstTermResults);
+    const secondTermAvg = calculateTermAverage(secondTermResults);
+    const thirdTermAvg = calculateTermAverage(thirdTermResults);
+
+    // Only calculate if we have all three term averages
+    if (firstTermAvg !== null && secondTermAvg !== null && thirdTermAvg !== null) {
+      const finalAverage = parseFloat(((firstTermAvg + secondTermAvg + thirdTermAvg) / 3).toFixed(2));
+      return {
+        firstTermAverage: firstTermAvg,
+        secondTermAverage: secondTermAvg,
+        thirdTermAverage: thirdTermAvg,
+        finalAverage: finalAverage
+      };
+    }
+
+    return null;
+  };
+
+  const thirdTermFinalAverage = calculateThirdTermFinalAverage();
+
+  // Check if all subjects have complete scores recorded
+  const areAllScoresComplete = () => {
+    // If no subjects assigned, return false
+    if (!studentSubjects || studentSubjects.length === 0) {
+      debug.log('No student subjects found');
+      return false;
+    }
+
+    // If no results for selected session/term, return false
+    if (!currentResults || currentResults.length === 0) {
+      debug.log('No current results found');
+      return false;
+    }
+
+    // Get all subject IDs from current results
+    const resultSubjectIds = currentResults.map(result => {
+      // Check for direct subject_id property
+      if (result.subject_id) {
+        return result.subject_id;
+      }
+      // Check for nested subject object with id
+      if (result.subject) {
+        if (typeof result.subject === 'object' && result.subject.id) {
+          return result.subject.id;
+        }
+        // If subject is just an ID (number)
+        if (typeof result.subject === 'number') {
+          return result.subject;
+        }
+      }
+      return null;
+    }).filter(id => id !== null);
+
+    debug.log('Student subjects:', studentSubjects);
+    debug.log('Result subject IDs:', resultSubjectIds);
+
+    // Check if all student subjects have results
+    const allSubjectsHaveResults = studentSubjects.every(subjectId => 
+      resultSubjectIds.includes(subjectId)
+    );
+
+    if (!allSubjectsHaveResults) {
+      debug.log('Not all subjects have results');
+      return false;
+    }
+
+    // Check if all results have complete scores (first_ca, second_ca, exam_score)
+    // Allow 0 as a valid score, but not null or undefined
+    const allScoresComplete = currentResults.every(result => {
+      const firstCA = result.first_ca !== null && result.first_ca !== undefined;
+      const secondCA = result.second_ca !== null && result.second_ca !== undefined;
+      const exam = result.exam_score !== null && result.exam_score !== undefined;
+      const isComplete = firstCA && secondCA && exam;
+      if (!isComplete) {
+        debug.log('Incomplete scores for subject:', result.subject?.name || result.subject_id, {
+          first_ca: result.first_ca,
+          second_ca: result.second_ca,
+          exam_score: result.exam_score
+        });
+      }
+      return isComplete;
+    });
+
+    debug.log('All scores complete:', allScoresComplete);
+    return allScoresComplete;
+  };
+
+  const canDownloadOrPrint = areAllScoresComplete();
+
+  // Generate remarks based on average score
+  let teacherRemark = '';
+  let principalRemark = '';
+  const avg = parseFloat(averageScore);
+  
+  if (avg >= 80) {
+    // Excellent performance (80-100)
+    const teacherRemarks = [
+      `Absolutely outstanding performance this term! ${studentInfo.name} has demonstrated exceptional understanding across all subjects and consistently delivers work of the highest quality. This level of academic excellence is truly commendable and sets a wonderful example for other students.`,
+      `What a remarkable achievement! ${studentInfo.name} has shown mastery in every subject area and continues to exceed expectations. The dedication to learning and consistent high performance is inspiring. Keep up this phenomenal work!`,
+      `Exceptional work throughout this term! ${studentInfo.name} displays brilliant analytical skills and deep understanding of concepts. The consistent excellence across all subjects reflects outstanding commitment to academic success. This is truly exemplary performance.`,
+      `Absolutely brilliant academic performance! ${studentInfo.name} has achieved excellence in every aspect of learning this term. The thoroughness of work and depth of understanding demonstrated is remarkable. Continue this outstanding trajectory!`
+    ];
+    
+    const principalRemarks = [
+      `${studentInfo.name} has brought great honor to our school this term with such outstanding academic excellence. This level of achievement reflects not just intelligence, but also exceptional dedication and strong character. We are incredibly proud of this remarkable performance.`,
+      `What an extraordinary academic achievement! ${studentInfo.name} has demonstrated the highest standards of excellence and continues to be a shining example of what dedication and hard work can accomplish. The school community celebrates this outstanding success.`,
+      `Truly exceptional performance that makes the entire school proud! ${studentInfo.name} has shown remarkable consistency in achieving excellence across all subjects. This outstanding academic achievement reflects strong values and commitment to learning.`,
+      `${studentInfo.name} has achieved academic excellence that stands as an inspiration to the entire school community. This remarkable performance demonstrates exceptional ability, dedication, and the pursuit of excellence in all endeavors. Congratulations on this outstanding achievement!`
+    ];
+    
+    teacherRemark = getRandomRemark(teacherRemarks);
+    principalRemark = getRandomRemark(principalRemarks);
+  } else if (avg >= 70) {
+    // Very good performance (70-79)
+    const teacherRemarks = [
+      `Excellent work this term! ${studentInfo.name} has shown strong understanding across most subjects and consistently produces quality work. There are still opportunities to reach even greater heights, but this performance demonstrates solid academic foundation and good study habits.`,
+      `Very impressive academic performance! ${studentInfo.name} displays good grasp of concepts and shows consistent effort in all subject areas. With continued focus and perhaps a bit more attention to detail, even higher achievements are definitely within reach.`,
+      `Strong academic showing this term! ${studentInfo.name} has performed well across all subjects and shows good analytical thinking. The work quality is commendable, and with sustained effort, excellent results can be achieved in the next term.`,
+      `Commendable academic performance! ${studentInfo.name} demonstrates solid understanding and good work ethic. The results reflect consistent effort and good study habits. Keep pushing forward as there's definitely potential for even greater success.`
+    ];
+    
+    const principalRemarks = [
+      `${studentInfo.name} has achieved very good results this term and should be proud of this solid academic performance. The consistency shown across subjects reflects good character and steady work ethic. With continued dedication, even greater achievements await.`,
+      `Well done on achieving such good academic results! ${studentInfo.name} has demonstrated reliable performance and good understanding across all subject areas. This steady progress and consistent effort are qualities that will lead to continued success.`,
+      `${studentInfo.name} has shown commendable academic performance this term. The good results achieved reflect steady application and growing understanding. Continue this positive trajectory and even better results will surely follow.`,
+      `Very pleased with ${studentInfo.name}'s academic progress this term. The good performance across subjects shows developing maturity and consistent effort. Keep up the good work and strive for even greater excellence next term.`
+    ];
+    
+    teacherRemark = getRandomRemark(teacherRemarks);
+    principalRemark = getRandomRemark(principalRemarks);
+  } else if (avg >= 60) {
+    // Good performance (60-69)
+    const teacherRemarks = [
+      `Good academic progress this term! ${studentInfo.name} shows understanding in most areas but there's room for improvement in consistency and depth of work. Focus on strengthening weaker subjects while maintaining performance in stronger areas. More regular practice and review will help achieve better results.`,
+      `Satisfactory performance with potential for growth! ${studentInfo.name} demonstrates good effort in several subjects but needs to work on maintaining consistency across all areas. Additional attention to homework completion and class participation will definitely improve overall results.`,
+      `Decent academic showing this term! ${studentInfo.name} has achieved reasonable results but there's clear potential for higher performance. Focus on improving study techniques, time management, and seeking help when concepts are unclear. Better results are definitely achievable.`,
+      `Fair academic performance with room for enhancement! ${studentInfo.name} shows good understanding in some subjects but needs more consistent effort across all areas. Regular revision, completing all assignments, and active participation in class will lead to improved results.`
+    ];
+    
+    const principalRemarks = [
+      `${studentInfo.name} has achieved fair results this term but we know there's potential for much better performance. Focus on developing better study habits, managing time effectively, and seeking support when needed. Consistent effort will lead to improved academic outcomes.`,
+      `Reasonable academic performance from ${studentInfo.name} this term, but there's definite room for improvement. Work on strengthening fundamental concepts, improving attendance, and being more engaged in classroom activities. Better results are within reach with increased effort.`,
+      `${studentInfo.name} has shown moderate progress this term but can certainly achieve more with increased dedication. Focus on completing all assignments, participating actively in class, and developing more effective study strategies for better academic success.`,
+      `Fair academic results from ${studentInfo.name} this term. While the performance is acceptable, there's clear potential for significant improvement. Encourage more consistent study habits, better time management, and active engagement with learning materials.`
+    ];
+    
+    teacherRemark = getRandomRemark(teacherRemarks);
+    principalRemark = getRandomRemark(principalRemarks);
+  } else if (avg >= 50) {
+    // Average performance (50-59)
+    const teacherRemarks = [
+      `${studentInfo.name} has achieved average results this term, which shows basic understanding but indicates significant room for improvement. Focus on strengthening fundamental concepts, improving homework completion rates, and seeking additional help when struggling with topics. More consistent effort is needed for better outcomes.`,
+      `Average performance this term shows that ${studentInfo.name} grasps some concepts but struggles with consistency and depth. Recommend developing better study routines, attending extra lessons when available, and working more closely with subject teachers to identify and address specific weaknesses.`,
+      `The results indicate that ${studentInfo.name} is working at an average level but has the potential to achieve much more. Focus on improving concentration during lessons, completing all assignments thoroughly, and developing more effective study techniques. Regular practice will lead to better understanding.`,
+      `${studentInfo.name} shows average academic performance which suggests the need for more focused effort and better study strategies. Work on time management, regular revision, and don't hesitate to ask questions when concepts are unclear. Improvement is definitely possible with increased dedication.`
+    ];
+    
+    const principalRemarks = [
+      `${studentInfo.name} has achieved average results this term, but we believe there's much more potential to be unlocked. Encourage the development of better study habits, improved class attendance, and more active participation in learning activities. Academic success requires consistent effort and dedication.`,
+      `The academic performance shown by ${studentInfo.name} this term is average but concerning as it indicates unrealized potential. Focus should be on developing discipline in studies, better time management, and seeking support from teachers and parents to improve academic outcomes.`,
+      `${studentInfo.name} has performed at an average level this term which, while acceptable, falls short of what we believe can be achieved. Encourage more serious commitment to studies, regular homework completion, and active engagement with learning materials for better results.`,
+      `Average academic results from ${studentInfo.name} this term suggest the need for renewed focus and commitment to learning. Work together with teachers and parents to develop strategies for improvement, better study habits, and increased motivation towards academic success.`
+    ];
+    
+    teacherRemark = getRandomRemark(teacherRemarks);
+    principalRemark = getRandomRemark(principalRemarks);
+  } else if (avg >= 40) {
+    // Below average performance (40-49)
+    const teacherRemarks = [
+      `${studentInfo.name} has achieved below average results this term, which indicates significant challenges in understanding core concepts. Immediate attention is needed to address fundamental gaps in knowledge. Recommend intensive remedial work, additional tutoring, and more structured study routines to improve academic performance.`,
+      `The results show that ${studentInfo.name} is struggling with basic concepts and needs immediate intervention. Focus on building foundational knowledge, improving attendance, and developing more effective study habits. Regular one-on-one support and additional resources are essential for improvement.`,
+      `Below average performance indicates that ${studentInfo.name} requires substantial academic support to catch up with peers. Work on strengthening basic skills, improving homework completion, and seeking help immediately when concepts are unclear. This situation requires urgent attention and dedicated effort.`,
+      `${studentInfo.name} shows concerning academic performance that requires immediate intervention. Focus on developing basic study skills, improving class participation, and working closely with teachers to identify specific areas of weakness. Significant improvement is needed to reach acceptable academic standards.`
+    ];
+    
+    const principalRemarks = [
+      `${studentInfo.name} has achieved concerning academic results this term that require immediate attention from both school and home. The below average performance indicates significant gaps in fundamental knowledge that must be addressed through intensive remedial work and increased support.`,
+      `The academic performance shown by ${studentInfo.name} this term is below acceptable standards and requires urgent intervention. Work closely with teachers to develop a comprehensive improvement plan, increase study time, and provide additional academic support to help catch up with peers.`,
+      `${studentInfo.name} has performed below expected academic standards this term, which is concerning. Immediate action is needed to address fundamental learning gaps through remedial classes, improved study habits, and increased parental involvement in academic progress.`,
+      `Below average results from ${studentInfo.name} this term indicate serious academic challenges that require immediate and sustained intervention. Develop a structured improvement plan, increase study time, and work closely with teachers to address specific weaknesses and improve overall performance.`
+    ];
+    
+    teacherRemark = getRandomRemark(teacherRemarks);
+    principalRemark = getRandomRemark(principalRemarks);
+  } else {
+    // Poor performance (below 40)
+    const teacherRemarks = [
+      `${studentInfo.name} has achieved very poor results this term, which indicates severe academic difficulties that require immediate and intensive intervention. The performance suggests fundamental gaps in understanding that need urgent attention through remedial work, additional tutoring, and comprehensive academic support.`,
+      `Extremely concerning academic performance from ${studentInfo.name} this term requires immediate action. The results indicate serious learning challenges that need to be addressed through intensive remedial programs, increased study time, and close monitoring of academic progress.`,
+      `The poor academic results from ${studentInfo.name} this term are alarming and require urgent intervention. Focus on building basic academic skills, improving attendance, and developing fundamental study habits. This situation needs immediate attention from teachers, parents, and academic support staff.`,
+      `${studentInfo.name} shows critically poor academic performance that demands immediate and comprehensive intervention. Work on developing basic learning skills, improving classroom engagement, and seeking intensive academic support to address fundamental knowledge gaps.`
+    ];
+    
+    const principalRemarks = [
+      `${studentInfo.name} has achieved critically poor academic results this term that require immediate and comprehensive intervention. The performance indicates severe academic difficulties that need urgent attention through intensive remedial work, increased support, and close monitoring of progress.`,
+      `The extremely poor academic performance from ${studentInfo.name} this term is concerning and requires immediate action. Develop a comprehensive improvement plan that includes remedial classes, increased study time, and close collaboration between school and home to address fundamental learning gaps.`,
+      `${studentInfo.name} has performed at critically low academic levels this term, which requires urgent and sustained intervention. Work together with teachers, parents, and support staff to develop intensive remedial programs and provide the necessary resources for academic improvement.`,
+      `Critically poor academic results from ${studentInfo.name} this term demand immediate and comprehensive intervention. This situation requires intensive remedial work, increased academic support, and close collaboration between all stakeholders to address fundamental learning challenges and improve academic outcomes.`
+    ];
+    
+    teacherRemark = getRandomRemark(teacherRemarks);
+    principalRemark = getRandomRemark(principalRemarks);
+  }
+
+  if (loading) {
+    return (
+      <AppLayout>
+        <div className="flex items-center justify-center h-64">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2" style={{ borderColor: COLORS.primary.red }}></div>
+        </div>
+      </AppLayout>
+    );
+  }
+
+  // Generate clean HTML content for download
+  const generateCleanHTML = (forPrint = false) => {
+    const content = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>Student Result - ${studentInfo.name}</title>
+          <style>
+            @media print {
+              @page { 
+                size: A4; 
+                margin: 10mm;
+              }
+              body { 
+                margin: 0; 
+                padding: 0;
+              }
+              .no-print { 
+                display: none !important; 
+              }
+            }
+            body { 
+              font-family: Arial, sans-serif; 
+              margin: ${forPrint ? '0' : '20px'}; 
+              padding: ${forPrint ? '10mm' : '0'};
+              background: white;
+              font-size: ${forPrint ? '10px' : '14px'};
+              position: relative;
+            }
+            /* Watermark */
+            .watermark {
+              position: fixed;
+              top: 50%;
+              left: 50%;
+              transform: translate(-50%, -50%) rotate(-45deg);
+              opacity: 0.08;
+              z-index: 0;
+              text-align: center;
+              width: 100%;
+              height: 100vh;
+              pointer-events: none;
+              overflow: hidden;
+            }
+            .watermark-content {
+              position: absolute;
+              top: 50%;
+              left: 50%;
+              transform: translate(-50%, -50%);
+              display: flex;
+              flex-direction: column;
+              align-items: center;
+              justify-content: center;
+            }
+            .watermark-logo {
+              width: 250px;
+              height: 250px;
+              margin-bottom: 30px;
+              opacity: 0.12;
+              object-fit: contain;
+            }
+            .watermark-text {
+              font-size: 80px;
+              font-weight: bold;
+              color: #aecb1f;
+              text-transform: uppercase;
+              letter-spacing: 10px;
+              white-space: nowrap;
+            }
+            /* Ensure content appears above watermark */
+            .result-content { 
+              max-width: ${forPrint ? '100%' : '800px'}; 
+              margin: 0 auto;
+              position: relative;
+              z-index: 1;
+            }
+            .school-header { 
+              text-align: center; 
+              margin-bottom: ${forPrint ? '10px' : '30px'}; 
+            }
+            .school-logo { 
+              width: ${forPrint ? '60px' : '80px'}; 
+              height: auto; 
+              margin: 0 auto ${forPrint ? '5px' : '10px'}; 
+              display: block; 
+            }
+            .school-name { 
+              font-size: ${forPrint ? '16px' : '24px'}; 
+              font-weight: bold; 
+              margin: ${forPrint ? '5px 0' : '10px 0'}; 
+            }
+            .school-address { 
+              font-size: ${forPrint ? '10px' : '14px'}; 
+              color: #666; 
+              margin-bottom: ${forPrint ? '10px' : '20px'}; 
+            }
+            .student-info {
+              background: #f9f9f9;
+              padding: ${forPrint ? '8px' : '15px'};
+              margin: ${forPrint ? '10px 0' : '20px 0'};
+              border: 1px solid #ddd;
+              border-radius: 5px;
+            }
+            .student-info h3 {
+              margin: 0 0 10px 0;
+              color: #333;
+            }
+            .info-grid {
+              display: grid;
+              grid-template-columns: 1fr 1fr;
+              gap: 10px;
+            }
+            table { 
+              width: 100%; 
+              border-collapse: collapse; 
+              margin: ${forPrint ? '8px 0' : '20px 0'}; 
+              font-size: ${forPrint ? '9px' : '12px'};
+            }
+            th, td { 
+              border: 1px solid #333; 
+              padding: ${forPrint ? '4px' : '8px'}; 
+              text-align: center; 
+            }
+            th { 
+              background-color: #f5f5f5; 
+              font-weight: bold;
+            }
+            .text-left { text-align: left; }
+            .remarks-section {
+              display: grid;
+              grid-template-columns: 1fr 1fr;
+              gap: ${forPrint ? '10px' : '20px'};
+              margin: ${forPrint ? '10px 0' : '20px 0'};
+            }
+            .remark-box {
+              border: 1px solid #ddd;
+              padding: ${forPrint ? '8px' : '15px'};
+              background: #f9f9f9;
+              border-radius: 5px;
+              font-size: ${forPrint ? '9px' : '12px'};
+            }
+            .remark-box h4 {
+              margin: 0 0 10px 0;
+              color: #333;
+            }
+            .grade-scale {
+              margin: ${forPrint ? '10px 0' : '20px 0'};
+            }
+            .grade-scale h4 {
+              margin-bottom: ${forPrint ? '5px' : '10px'};
+              font-size: ${forPrint ? '11px' : '14px'};
+            }
+            .grade-table {
+              font-size: ${forPrint ? '8px' : '11px'};
+            }
+            .summary-stats {
+              background: #e8f4f8;
+              padding: ${forPrint ? '8px' : '15px'};
+              border-radius: 5px;
+              margin: ${forPrint ? '10px 0' : '20px 0'};
+            }
+            .stats-grid {
+              display: grid;
+              grid-template-columns: repeat(3, 1fr);
+              gap: 15px;
+              text-align: center;
+            }
+            .stat-item {
+              background: white;
+              padding: 10px;
+              border-radius: 3px;
+            }
+            .stat-value {
+              font-size: ${forPrint ? '14px' : '18px'};
+              font-weight: bold;
+              color: #aecb1f;
+            }
+            .stat-label {
+              font-size: ${forPrint ? '9px' : '12px'};
+              color: #666;
+            }
+          </style>
+        </head>
+        <body>
+          <!-- Watermark -->
+          <div class="watermark">
+            <div class="watermark-content">
+              <img src="${schoolInfo.logo}" alt="School Logo" class="watermark-logo" />
+              <div class="watermark-text">${schoolInfo.name}</div>
+            </div>
+          </div>
+          
+          <div class="result-content">
+            <div class="school-header">
+              <img src="${schoolInfo.logo}" alt="School Logo" class="school-logo" />
+              <div class="school-name">${schoolInfo.name}</div>
+              <div class="school-address">${schoolInfo.address}</div>
+            </div>
+
+            <h2 style="text-align: center; color: #f30401; margin: ${forPrint ? '10px 0' : '20px 0'}; font-size: ${forPrint ? '14px' : '20px'};">STUDENT RESULT REPORT</h2>
+
+            <div class="student-info">
+              <h3>Student Information</h3>
+              <div class="info-grid">
+                <div><strong>Name:</strong> ${studentInfo.name}</div>
+                <div><strong>Admission Number:</strong> ${studentInfo.admissionNumber}</div>
+                <div><strong>Class:</strong> ${studentInfo.class}</div>
+                <div><strong>Session:</strong> ${selectedSession}</div>
+              </div>
+              <div style="margin-top: 10px;"><strong>Term:</strong> ${selectedTerm}</div>
+              ${studentInfo.promotionStatus ? `
+                <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #ddd;">
+                  <strong>Promotion Status:</strong> 
+                  <span style="font-weight: bold; 
+                    ${studentInfo.promotionStatus === 'promoted' ? 'color: #22c55e;' : ''}
+                    ${studentInfo.promotionStatus === 'graduated' ? 'color: #3b82f6;' : ''}
+                    ${studentInfo.promotionStatus === 'repeated' ? 'color: #ef4444;' : ''}
+                  ">
+                    ${studentInfo.promotionStatus === 'promoted' ? '✓ PROMOTED TO NEXT CLASS' : ''}
+                    ${studentInfo.promotionStatus === 'graduated' ? '🎓 GRADUATED' : ''}
+                    ${studentInfo.promotionStatus === 'repeated' ? '⚠ REPEATED - TO REPEAT CURRENT CLASS' : ''}
+                  </span>
+                </div>
+              ` : ''}
+            </div>
+
+            <table>
+              <thead>
+                <tr>
+                  <th class="text-left">Subject</th>
+                  <th>1st Test (20)</th>
+                  <th>2nd Test (20)</th>
+                  <th>Exam (60)</th>
+                  <th>Total (100)</th>
+                  <th>Grade</th>
+                                     <th>Percentage</th>
+                  <th>Remark</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${scaledResults.map(result => `
+                  <tr>
+                    <td class="text-left">${result.subject}</td>
+                    <td>${result.first_ca}</td>
+                    <td>${result.second_ca}</td>
+                    <td>${result.exam}</td>
+                    <td>${result.total}</td>
+                    <td>${result.grade}</td>
+                                         <td>${result.percentage}%</td>
+                    <td>${result.remark}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+
+            <div class="summary-stats">
+              <h4 style="text-align: center; margin-bottom: 15px;">Performance Summary</h4>
+              <div class="stats-grid">
+                <div class="stat-item">
+                  <div class="stat-value">${totalScore}</div>
+                  <div class="stat-label">Total Score</div>
+                </div>
+                <div class="stat-item">
+                  <div class="stat-value">${averageScore}%</div>
+                  <div class="stat-label">Average Score</div>
+                </div>
+                                 <div class="stat-item">
+                   <div class="stat-value">${scaledResults.length}</div>
+                   <div class="stat-label">Total Subjects</div>
+                 </div>
+              </div>
+            </div>
+
+            ${thirdTermFinalAverage && selectedTerm === 'Third Term' ? `
+            <div style="margin: 15px 0; padding: 12px; background: white; border: 1px solid #e5e7eb; border-radius: 6px;">
+              <h4 style="font-size: ${forPrint ? '10px' : '12px'}; font-weight: 600; color: #111827; margin-bottom: 10px;">Final Average Calculation</h4>
+              <div style="font-size: ${forPrint ? '8px' : '10px'};">
+                <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                  <span style="color: #4b5563;">First Term Average:</span>
+                  <span style="font-weight: 500; color: #111827;">${thirdTermFinalAverage.firstTermAverage}%</span>
+                </div>
+                <div style="text-align: center; color: #9ca3af; margin: 2px 0; font-size: ${forPrint ? '8px' : '10px'};">+</div>
+                <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                  <span style="color: #4b5563;">Second Term Average:</span>
+                  <span style="font-weight: 500; color: #111827;">${thirdTermFinalAverage.secondTermAverage}%</span>
+                </div>
+                <div style="text-align: center; color: #9ca3af; margin: 2px 0; font-size: ${forPrint ? '8px' : '10px'};">+</div>
+                <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                  <span style="color: #4b5563;">Third Term Average:</span>
+                  <span style="font-weight: 500; color: #111827;">${thirdTermFinalAverage.thirdTermAverage}%</span>
+                </div>
+                <div style="text-align: center; color: #9ca3af; margin: 6px 0 4px 0; padding-top: 4px; border-top: 1px solid #e5e7eb; font-size: ${forPrint ? '8px' : '10px'};">÷ 3</div>
+                <div style="display: flex; justify-content: space-between; padding-top: 6px; margin-top: 6px; border-top: 1px solid #d1d5db;">
+                  <span style="font-size: ${forPrint ? '9px' : '11px'}; font-weight: 600; color: #111827;">Final Average for this Class:</span>
+                  <span style="font-size: ${forPrint ? '11px' : '13px'}; font-weight: bold; color: #dc2626;">${thirdTermFinalAverage.finalAverage}%</span>
+                </div>
+                <p style="font-size: ${forPrint ? '7px' : '9px'}; color: #6b7280; margin-top: 6px; text-align: center;">
+                  (First Term Average + Second Term Average + Third Term Average) ÷ 3
+                </p>
+              </div>
+            </div>
+            ` : ''}
+
+            <div class="remarks-section">
+              <div class="remark-box">
+                <h4>Teacher's Remark</h4>
+                <p>${teacherRemark}</p>
+              </div>
+              <div class="remark-box">
+                <h4>Principal's Remark</h4>
+                <p>${principalRemark}</p>
+              </div>
+            </div>
+
+            <div class="grade-scale">
+              <h4>Grade Scale</h4>
+              <table class="grade-table">
+                <thead>
+                  <tr>
+                    <th>Grade</th>
+                    <th>Score Range</th>
+                    <th>Remark</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${gradeScale.map(scale => `
+                    <tr>
+                      <td>${scale.grade}</td>
+                      <td>${scale.min} - ${scale.max}</td>
+                      <td>${scale.remark}</td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </body>
+      </html>
+    `;
+    return content;
+  };
+
+  // Print Result - Same clean format as downloads
+  const handlePrintResult = () => {
+    try {
+      const htmlContent = generateCleanHTML();
+      const newWindow = window.open('', '_blank');
+      newWindow.document.write(htmlContent);
+      newWindow.document.close();
+      
+      // Auto-trigger print dialog
+      setTimeout(() => {
+        newWindow.print();
+      }, 1000);
+    } catch (error) {
+      alert('Failed to print result. Please try again.');
+      debug.error('Print error:', error);
+    }
+  };
+
+  // Download as PDF - Using backend PDF generation
+  const handleDownloadPDF = async () => {
+    try {
+      // Validate that we have required data
+      if (!selectedTerm) {
+        showError('Please select a term to download the report card');
+        return;
+      }
+
+      if (!selectedSession) {
+        showError('Please select an academic session');
+        return;
+      }
+
+      // Get current term from selectedTerm state
+      const termMapping = {
+        'First Term': 'first',
+        'Second Term': 'second',
+        'Third Term': 'third',
+      };
+      
+      const term = termMapping[selectedTerm] || 'first';
+      
+      // Get academic session ID from selected session
+      // First try to find it from availableSessionsData
+      let academicSessionId = null;
+      const sessionData = availableSessionsData.find(s => s.name === selectedSession);
+      if (sessionData) {
+        academicSessionId = sessionData.id;
+      } else if (currentSession && currentSession.name === selectedSession) {
+        academicSessionId = currentSession.id;
+      } else {
+        // Try to get from results data
+        const currentResults = getCurrentResults();
+        if (currentResults.length > 0 && currentResults[0].academic_session) {
+          academicSessionId = currentResults[0].academic_session.id;
+        } else if (currentResults.length > 0 && currentResults[0].academic_session_id) {
+          academicSessionId = currentResults[0].academic_session_id;
+        }
+      }
+      
+      if (!academicSessionId) {
+        showError('Could not find academic session. Please contact the administrator.');
+        return;
+      }
+      
+      const params = {
+        term: term,
+        academic_session_id: academicSessionId,
+      };
+      
+      await API.generateStudentReportCardSelf(params);
+      
+      showSuccess('PDF downloaded successfully!');
+    } catch (error) {
+      const errorMessage = error.message || 'Failed to generate PDF report card. Please ensure you are logged in and have the required permissions.';
+      showError(errorMessage);
+      debug.error('PDF generation error:', error);
+    }
+  };
+
+
+  return (
+    <AppLayout>
+      <div className="min-h-screen bg-gray-50 py-8">
+      {/* Header */}
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mb-8">
+        <h1 className="text-2xl font-bold text-gray-900">My Results</h1>
+        <p className="text-gray-600">View your academic performance and progress</p>
+        <div className="flex flex-col items-center mt-4 space-y-2">
+          <img src={schoolInfo.logo} alt="School Logo" className="h-40 w-40 object-contain" />
+          <span className="text-2xl font-bold text-gray-800">{schoolInfo.name}</span>
+          <span className="text-gray-500 text-sm">{schoolInfo.address}</span>
+        </div>
+      </div>
+      
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div id="result-sheet">
+      {/* Student Info Card */}
+      <div className="bg-white shadow rounded-lg mb-6 p-6">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-xl font-semibold text-gray-900">{studentInfo.name}</h2>
+            <p className="text-sm text-gray-500">
+              {studentInfo.class} • {studentInfo.admissionNumber} • Session: {studentInfo.session}
+            </p>
+            {studentInfo.promotionStatus && (
+              <p className={`text-sm font-semibold mt-1 ${
+                studentInfo.promotionStatus === 'promoted' ? 'text-green-600' :
+                studentInfo.promotionStatus === 'graduated' ? 'text-blue-600' :
+                studentInfo.promotionStatus === 'repeated' ? 'text-red-600' : ''
+              }`}>
+                {studentInfo.promotionStatus === 'promoted' && '✓ PROMOTED TO NEXT CLASS'}
+                {studentInfo.promotionStatus === 'graduated' && '🎓 GRADUATED'}
+                {studentInfo.promotionStatus === 'repeated' && '⚠ REPEATED - TO REPEAT CURRENT CLASS'}
+              </p>
+            )}
+            {admissionSession && (
+              <p className="text-xs text-gray-400 mt-1">
+                Admitted: {admissionSession.name} - {admissionTerm ? `${admissionTerm.charAt(0).toUpperCase() + admissionTerm.slice(1)} Term` : ''}
+              </p>
+            )}
+          </div>
+          <div className="flex flex-col sm:flex-row items-start sm:items-end space-y-3 sm:space-y-0 sm:space-x-4">
+            <div className="w-full sm:w-auto">
+              <label htmlFor="session" className="block text-sm font-medium text-gray-700 mb-1">
+                Academic Session
+              </label>
+              <select
+                id="session"
+                value={selectedSession}
+                onChange={(e) => {
+                  setSelectedSession(e.target.value);
+                }}
+                className="block w-full sm:w-48 px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+              >
+                {availableSessions.length === 0 ? (
+                  <option value="">No sessions available</option>
+                ) : (
+                  availableSessions.map(session => (
+                    <option key={session} value={session}>{session}</option>
+                  ))
+                )}
+              </select>
+            </div>
+            <div className="w-full sm:w-auto">
+              <label htmlFor="term" className="block text-sm font-medium text-gray-700 mb-1">
+                Term
+              </label>
+              <select
+                id="term"
+                value={selectedTerm}
+                onChange={(e) => setSelectedTerm(e.target.value)}
+                disabled={!selectedSession || getAvailableTerms().length === 0}
+                className="block w-full sm:w-40 px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 disabled:bg-gray-100 disabled:cursor-not-allowed"
+              >
+                {getAvailableTerms().length === 0 ? (
+                  <option value="">No terms available</option>
+                ) : (
+                  getAvailableTerms().map(term => (
+                    <option key={term} value={term}>{term}</option>
+                  ))
+                )}
+              </select>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Summary Cards */}
+        {scaledResults.length > 0 && (
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+          <div className="bg-white overflow-hidden shadow rounded-lg">
+            <div className="p-5">
+              <div className="flex items-center">
+                <div className="flex-shrink-0">
+                  <div className="w-8 h-8 rounded-md flex items-center justify-center text-white" style={{ backgroundColor: COLORS.primary.red }}>
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                  </div>
+                </div>
+                <div className="ml-5 w-0 flex-1">
+                  <dl>
+                    <dt className="text-sm font-medium text-gray-500 truncate">
+                      Total Subjects
+                    </dt>
+                    <dd className="text-lg font-medium text-gray-900">
+                        {scaledResults.length}
+                    </dd>
+                  </dl>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white overflow-hidden shadow rounded-lg">
+            <div className="p-5">
+              <div className="flex items-center">
+                <div className="flex-shrink-0">
+                  <div className="w-8 h-8 rounded-md flex items-center justify-center text-white bg-green-500">
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+                    </svg>
+                  </div>
+                </div>
+                <div className="ml-5 w-0 flex-1">
+                  <dl>
+                    <dt className="text-sm font-medium text-gray-500 truncate">
+                      Average Score
+                    </dt>
+                    <dd className="text-lg font-medium text-gray-900">
+                      {averageScore}%
+                    </dd>
+                  </dl>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white overflow-hidden shadow rounded-lg">
+            <div className="p-5">
+              <div className="flex items-center">
+                <div className="flex-shrink-0">
+                  <div className="w-8 h-8 rounded-md flex items-center justify-center text-white" style={{ backgroundColor: COLORS.primary.yellow }}>
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+                    </svg>
+                  </div>
+                </div>
+                <div className="ml-5 w-0 flex-1">
+                  <dl>
+                                         <dt className="text-sm font-medium text-gray-500 truncate">
+                       Highest Score
+                     </dt>
+                     <dd className="text-lg font-medium text-gray-900">
+                       {scaledResults.length > 0 ? Math.max(...scaledResults.map(r => r.total)) : 0}
+                     </dd>
+                  </dl>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white overflow-hidden shadow rounded-lg">
+            <div className="p-5">
+              <div className="flex items-center">
+                <div className="flex-shrink-0">
+                  <div className="w-8 h-8 rounded-md flex items-center justify-center text-white" style={{ backgroundColor: COLORS.primary.blue }}>
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                  </div>
+                </div>
+                <div className="ml-5 w-0 flex-1">
+                  <dl>
+                    <dt className="text-sm font-medium text-gray-500 truncate">
+                      Subjects Passed
+                    </dt>
+                    <dd className="text-lg font-medium text-gray-900">
+                        {scaledResults.filter(r => r.total >= 40).length}/{scaledResults.length}
+                    </dd>
+                  </dl>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Results Table */}
+      <div className="bg-white shadow rounded-lg">
+               <div className="px-6 py-4 border-b border-gray-200">
+         <h3 className="text-lg font-medium text-gray-900">
+           {selectedTerm} Results - {selectedSession}
+         </h3>
+         <p className="text-sm text-gray-600 mt-1">
+           All scores are retrieved directly from the database as entered by subject teachers
+         </p>
+       </div>
+          {scaledResults.length > 0 ? (
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Subject
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    1st Test (20)
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    2nd Test (20)
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Exam (60)
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Total (100)
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Grade
+                  </th>
+                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                     Percentage
+                   </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Remark
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                  {scaledResults.map((result, index) => (
+                  <tr key={index} className="hover:bg-gray-50">
+                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                      {result.subject}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                      {result.first_ca}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                      {result.second_ca}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                      {result.exam}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                      {result.total}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${getGradeColor(result.grade)}`}>
+                        {result.grade}
+                      </span>
+                    </td>
+                                                              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                       {result.percentage}%
+                     </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                      {result.remark}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="px-6 py-12 text-center">
+            <svg className="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            <h3 className="mt-2 text-sm font-medium text-gray-900">No results available</h3>
+            <p className="mt-1 text-sm text-gray-500">
+              Results for {selectedTerm} have not been published yet.
+            </p>
+          </div>
+        )}
+      </div>
+
+      {/* Third Term Final Average Calculation - Only for Third Term */}
+      {thirdTermFinalAverage && selectedTerm === 'Third Term' && (
+        <div className="mt-6 bg-white shadow rounded-lg p-4">
+          <h3 className="text-sm font-semibold text-gray-900 mb-3">Final Average Calculation</h3>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-gray-600">First Term Average:</span>
+              <span className="font-medium text-gray-900">{thirdTermFinalAverage.firstTermAverage}%</span>
+            </div>
+            <div className="flex items-center justify-center text-gray-400 text-xs">+</div>
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-gray-600">Second Term Average:</span>
+              <span className="font-medium text-gray-900">{thirdTermFinalAverage.secondTermAverage}%</span>
+            </div>
+            <div className="flex items-center justify-center text-gray-400 text-xs">+</div>
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-gray-600">Third Term Average:</span>
+              <span className="font-medium text-gray-900">{thirdTermFinalAverage.thirdTermAverage}%</span>
+            </div>
+            <div className="flex items-center justify-center text-gray-400 text-xs border-t border-gray-200 pt-2 mt-2">÷ 3</div>
+            <div className="flex items-center justify-between pt-2 mt-2 border-t border-gray-300">
+              <span className="text-sm font-semibold text-gray-900">Final Average for this Class:</span>
+              <span className="text-base font-bold" style={{ color: COLORS.primary.red }}>{thirdTermFinalAverage.finalAverage}%</span>
+            </div>
+            <p className="text-xs text-gray-500 mt-1 text-center">
+              (First Term Average + Second Term Average + Third Term Average) ÷ 3
+            </p>
+          </div>
+        </div>
+      )}
+
+        {/* Teacher/Principal Remarks - Only show when all scores are complete */}
+        {scaledResults.length > 0 && canDownloadOrPrint && (
+          <div className="mt-8 grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="bg-white p-6 rounded shadow">
+              <h4 className="font-semibold mb-2">Teacher's Remark</h4>
+              <div className="w-full border border-gray-300 rounded p-2 bg-gray-50 text-gray-700 min-h-[48px]">{teacherRemark}</div>
+            </div>
+            <div className="bg-white p-6 rounded shadow">
+              <h4 className="font-semibold mb-2">Principal's Remark</h4>
+              <div className="w-full border border-gray-300 rounded p-2 bg-gray-50 text-gray-700 min-h-[48px]">{principalRemark}</div>
+            </div>
+          </div>
+        )}
+        
+        {/* Show message when scores are incomplete */}
+        {scaledResults.length > 0 && !canDownloadOrPrint && (
+          <div className="mt-8 bg-blue-50 border border-blue-200 rounded-md p-4">
+            <p className="text-sm text-blue-800">
+              <strong>Note:</strong> Teacher's and Principal's remarks will be available once all subjects have complete scores recorded (First CA, Second CA, and Exam scores).
+            </p>
+          </div>
+        )}
+        {/* Grade Scale Table */}
+        <div className="mt-8 bg-white p-6 rounded shadow max-w-xl mx-auto">
+          <h4 className="font-semibold mb-2">Grade Scale</h4>
+          <table className="min-w-full text-sm">
+            <thead>
+              <tr>
+                <th className="px-4 py-2 text-left">Grade</th>
+                <th className="px-4 py-2 text-left">Score Range</th>
+                <th className="px-4 py-2 text-left">Remark</th>
+              </tr>
+            </thead>
+            <tbody>
+              {gradeScale.map((scale, idx) => (
+                <tr key={scale.grade} className={idx % 2 === 0 ? 'bg-gray-50' : ''}>
+                  <td className="px-4 py-2 font-bold">{scale.grade}</td>
+                  <td className="px-4 py-2">{scale.min} - {scale.max}</td>
+                  <td className="px-4 py-2">{scale.remark}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {/* Print/Download Actions */}
+      {scaledResults.length > 0 && (
+        <div className="mt-6">
+          {canDownloadOrPrint ? (
+            <div className="flex flex-wrap gap-4 justify-end">
+              <button
+                onClick={handlePrintResult}
+                className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 transition-colors duration-200"
+              >
+                Print Results
+              </button>
+              <button
+                onClick={handleDownloadPDF}
+                className="px-4 py-2 text-sm font-medium text-white rounded-md hover:opacity-90 transition-opacity duration-200"
+                style={{ backgroundColor: COLORS.primary.red }}
+              >
+                Download PDF
+              </button>
+            </div>
+          ) : (
+            <div className="bg-yellow-50 border border-yellow-200 rounded-md p-4">
+              <p className="text-sm text-yellow-800">
+                <strong>Note:</strong> Download and Print options will be available once all subjects have complete scores recorded (First CA, Second CA, and Exam scores).
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+    </div>
+    </AppLayout>
+  );
+};
+
+export default StudentResults;

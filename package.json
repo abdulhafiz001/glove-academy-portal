@@ -1,0 +1,24 @@
+{
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "dev": "vite",
+        "build": "vite build"
+    },
+    "devDependencies": {
+        "@inertiajs/react": "^1.0.0",
+        "@tailwindcss/vite": "^4.1.17",
+        "@types/react": "^19.1.8",
+        "@types/react-dom": "^19.1.6",
+        "@vitejs/plugin-react": "^4.6.0",
+        "axios": "^1.6.4",
+        "laravel-vite-plugin": "^1.0",
+        "lucide-react": "^0.525.0",
+        "react": "^19.1.0",
+        "react-dom": "^19.1.0",
+        "vite": "^5.0"
+    },
+    "dependencies": {
+        "tailwindcss": "^4.1.17"
+    }
+}
